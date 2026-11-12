@@ -46,13 +46,22 @@ object SelfUpdate {
             if (!isNewer(v, BuildConfig.VERSION_NAME)) return@withContext null
             AppUpdate(
                 version = v,
-                notes = o.optString("body").trim(),
+                notes = plain(o.optString("body")),
                 apkUrl = apk.getString("browser_download_url"),
                 sizeBytes = apk.optLong("size"),
                 sha256 = apk.optString("digest").removePrefix("sha256:").takeIf { it.length == 64 },
             )
         }
     }
+
+    /** Release notes are Markdown; the banner shows plain text ("**New**" -> "New", "- item" -> "• item", links -> their text). */
+    fun plain(md: String): String = md.lines().joinToString("\n") { line ->
+        line.trim()
+            .replace(Regex("""^#+\s*"""), "")
+            .replace(Regex("""^[-*]\s+"""), "• ")
+            .replace(Regex("""\[([^\]]+)]\([^)]*\)"""), "$1")
+            .replace("**", "").replace("`", "")
+    }.trim()
 
     fun isNewer(remote: String, local: String): Boolean {
         fun parts(s: String) = s.substringBefore('-').split('.').map { it.toIntOrNull() ?: 0 }
