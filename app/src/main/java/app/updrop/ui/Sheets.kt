@@ -141,7 +141,7 @@ fun SettingsSheet(vm: MainViewModel, onDismiss: () -> Unit) {
             Toggle("Only on Wi-Fi", "Skip checks on mobile data", s.wifiOnly) { vm.saveSettings(s.copy(wifiOnly = it)) }
             Toggle("Notify me", "A notification when a new build appears", s.notify) { vm.saveSettings(s.copy(notify = it)) }
             Spacer(Modifier.height(10.dp))
-            Text("Downloads are saved to Downloads/Updrop.", color = C.Faint, fontSize = 12.sp)
+            Text("Split bundles (.apks) are saved to Download/Updrop. Plain APKs stay in Updrop's own folder for a week.", color = C.Faint, fontSize = 12.sp)
         }
     }
 }

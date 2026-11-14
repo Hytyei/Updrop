@@ -227,6 +227,9 @@ private fun VariantCard(app: TrackedApp, v: Variant, recommended: Boolean, reaso
         inspect(ctx, st.id)?.signer?.let { vm.learnSigner(app.pageUrl, v.flavour, it) }
     }
     val sigMatch = Recommender.signatureMatch(app, v, inst)
+    val storagePermission = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { ok -> if (ok) { dlId = Downloads.start(ctx, v.url); vm.setPreferred(app.pageUrl, v.kind) } }
     val pinned = app.preferredKind == v.kind
     val shape = RoundedCornerShape(20.dp)
     val progress by animateFloatAsState(state?.fraction ?: 0f, tween(350), label = "dl")
@@ -281,7 +284,7 @@ private fun VariantCard(app: TrackedApp, v: Variant, recommended: Boolean, reaso
             val s = state
             val label = when {
                 inspecting -> "Checking the file…"
-                s?.finished == true -> if (v.isBundle) "Downloaded" else "Install"
+                s?.finished == true -> if (v.isBundle) "Open in installer" else "Install"
                 s?.failed == true -> "Retry download"
                 s != null -> "${(s.fraction * 100).toInt()}%  ·  ${mb(s.done)} / ${if (s.total > 0) mb(s.total) else "?"}"
                 else -> "Download"
@@ -292,7 +295,15 @@ private fun VariantCard(app: TrackedApp, v: Variant, recommended: Boolean, reaso
                 modifier = Modifier.weight(1f),
             ) {
                 when {
-                    s?.finished == true && v.isBundle -> Toast.makeText(ctx, "Saved to Android/data/app.updrop/files/Download. Open it with SAI (split APK installer).", Toast.LENGTH_LONG).show()
+                    s?.finished == true && v.isBundle -> scope.launch {
+                        inspecting = true
+                        val uri = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { Downloads.publicBundleUri(ctx, v.url, s.id) }
+                        inspecting = false
+                        when {
+                            uri == null -> Toast.makeText(ctx, "The file is gone. Download it again.", Toast.LENGTH_LONG).show()
+                            !Downloads.openBundle(ctx, uri) -> Toast.makeText(ctx, "Saved in Download/Updrop. Install SAI (split APK installer) to open it.", Toast.LENGTH_LONG).show()
+                        }
+                    }
                     inspecting -> {}
                     s?.finished == true -> scope.launch {
                         inspecting = true
@@ -311,6 +322,9 @@ private fun VariantCard(app: TrackedApp, v: Variant, recommended: Boolean, reaso
                         if (conflict == null) install(ctx, s.id)
                     }
                     s != null && !s.failed -> Downloads.cancel(ctx, v.url).also { dlId = null; state = null }
+                    v.isBundle && Build.VERSION.SDK_INT < 29 &&
+                        androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED ->
+                        storagePermission.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) // Android 8-9 only: needed for Download/Updrop
                     else -> {
                         dlId = Downloads.start(ctx, v.url)
                         vm.setPreferred(app.pageUrl, v.kind) // remember the flavour for next time
@@ -322,6 +336,9 @@ private fun VariantCard(app: TrackedApp, v: Variant, recommended: Boolean, reaso
         }
         if (state != null && state?.finished == false && state?.failed == false) {
             Text("Tap the bar to cancel", color = C.Faint, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
+        }
+        if (v.isBundle && state?.finished == true) {
+            Text("Saved in Download/Updrop", color = C.Faint, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
         }
     }
 

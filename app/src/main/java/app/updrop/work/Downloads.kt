@@ -21,15 +21,29 @@ object Downloads {
     private fun dm(c: Context) = c.getSystemService(DownloadManager::class.java)
     private fun prefs(c: Context) = c.getSharedPreferences("updrop-dl", Context.MODE_PRIVATE)
 
+    /** True for split bundles (.apks/.xapk/.apkm): Android's own installer can't open them, SAI-style installers can. */
+    fun isBundle(url: String) = url.substringBefore('?').lowercase().let { it.endsWith(".apks") || it.endsWith(".xapk") || it.endsWith(".apkm") }
+
+    private fun fileName(url: String) = Uri.parse(url).lastPathSegment?.replace(Regex("""[^\w.\-()]"""), "_") ?: "update.apk"
+
     fun start(c: Context, url: String): Long {
-        val file = Uri.parse(url).lastPathSegment?.replace(Regex("""[^\w.\-()]"""), "_") ?: "update.apk"
+        val file = fileName(url)
+        val bundle = isBundle(url)
+        prefs(c).edit().remove("exported:$url").apply()
         val req = DownloadManager.Request(Uri.parse(url))
             .setTitle(file)
             .setDescription("Updrop")
             .setMimeType(if (file.endsWith(".apk", true)) "application/vnd.android.package-archive" else "application/octet-stream")
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            // app-specific folder (Android/data/app.updrop/files/Download): Updrop can read the file back to check its signing key
-            .setDestinationInExternalFilesDir(c, Environment.DIRECTORY_DOWNLOADS, file)
+        if (bundle) {
+            // bundles go to the PUBLIC Download/Updrop folder, where SAI and file managers can see them
+            // (Android/data is hidden from other apps since Android 11)
+            req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "Updrop/$file")
+        } else {
+            // plain APKs stay in Updrop's own folder so it can read the signing key back before installing
+            req.setDestinationInExternalFilesDir(c, Environment.DIRECTORY_DOWNLOADS, file)
+        }
+        req
             .addRequestHeader("Referer", "https://www.farsroid.com/")
             .addRequestHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36")
         val id = dm(c).enqueue(req)
@@ -78,6 +92,69 @@ object Downloads {
         val dir = c.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return
         val cutoff = System.currentTimeMillis() - days * 86_400_000L
         dir.listFiles()?.filter { it.lastModified() < cutoff }?.forEach { it.delete() }
+    }
+
+    /**
+     * Content URI of a finished bundle in the public Download/Updrop folder.
+     * Bundles downloaded by Updrop 1.1.0 sit in the private folder: those are copied out first.
+     */
+    fun publicBundleUri(c: Context, url: String, id: Long): Uri? {
+        prefs(c).getString("exported:$url", null)?.let { saved ->
+            val u = Uri.parse(saved)
+            if (exists(c, u)) return u
+        }
+        val path = localPath(c, id)
+        val privateDir = c.getExternalFilesDir(null)?.absolutePath
+        if (path == null || privateDir == null || !path.startsWith(privateDir)) {
+            return dm(c).getUriForDownloadedFile(id) // already public
+        }
+        val src = java.io.File(path)
+        val out = exportToDownloads(c, src, fileName(url)) ?: return null
+        src.delete()
+        prefs(c).edit().putString("exported:$url", out.toString()).apply()
+        return out
+    }
+
+    private fun exists(c: Context, u: Uri): Boolean = try {
+        c.contentResolver.openFileDescriptor(u, "r")?.use { true } ?: false
+    } catch (e: Exception) { false }
+
+    /** Copies a file into Download/Updrop. Android 10+: MediaStore (no permission). Android 8-9: needs storage permission. */
+    private fun exportToDownloads(c: Context, src: java.io.File, name: String): Uri? = try {
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
+                put(android.provider.MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Updrop")
+                put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val r = c.contentResolver
+            val uri = r.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
+            r.openOutputStream(uri)?.use { out -> src.inputStream().use { it.copyTo(out, 256 * 1024) } }
+            r.update(uri, android.content.ContentValues().apply { put(android.provider.MediaStore.Downloads.IS_PENDING, 0) }, null, null)
+            uri
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Updrop").apply { mkdirs() }
+            val dst = java.io.File(dir, name)
+            src.copyTo(dst, overwrite = true)
+            Uri.fromFile(dst).let { androidx.core.content.FileProvider.getUriForFile(c, "${c.packageName}.files", dst) }
+        }
+    } catch (e: Exception) { null }
+
+    /**
+     * Hands a bundle to a split-APK installer (SAI and similar) via "Open with".
+     * Falls back to the share sheet, where SAI also appears. Returns false when nothing can take it.
+     */
+    fun openBundle(c: Context, uri: Uri): Boolean {
+        val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/octet-stream")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        val viewers = c.packageManager.queryIntentActivities(view, 0).filter { it.activityInfo.packageName != c.packageName }
+        val target = if (viewers.isNotEmpty()) view else Intent(Intent.ACTION_SEND).setType("application/octet-stream")
+            .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        return try {
+            c.startActivity(Intent.createChooser(target, "Install the bundle with…").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); true
+        } catch (e: Exception) { false }
     }
 
     /** Opens the system installer for a finished download. */
